@@ -303,7 +303,8 @@ def launch():
         import time
 
         from ..auto_tuner.tuner import AutoTuner
-        from ..auto_tuner.utils import gen_new_args
+        from ..auto_tuner.utils import gen_new_args, read_log
+        from ..auto_tuner.recorder import History_recorder
         from . import controllers
 
         # read user defined tuner config json
@@ -336,6 +337,9 @@ def launch():
         # get max time per task run
         max_time_per_task = tuner_cfg.get("max_time_per_task", 1800)
 
+        # build history recorder
+        recorder = History_recorder()
+        
         job_id = 0
         while cur_cfg:
             # auto tuner supports dp, mp, pp, micro batch size, sharding, recompute by default and every task has own log dir
@@ -373,6 +377,22 @@ def launch():
             signal.signal(signal.SIGALRM, c.not_exit_signal_handler)
             signal.alarm(max_time_per_task)
             c.run()
+            
+            # Process generated result
+            metric, err = read_log(path=ctx.args.log_dir, file="workerlog.0", target_metric=tuner_cfg["metric_cfg"]["name"])
+            if err:
+                ctx.logger.warning("Read log failed for parameters: {}".format(log_dir))
+            else:
+                cur_cfg['time'] = metric # for pruner use.
+                cur_cfg[tuner_cfg['metric_cfg']['name']] = metric
+                # record history
+                recorder.add_cfg(**cur_cfg)
+                cur_best_cfgs, err = recorder.get_best(metric=tuner_cfg['metric_cfg']['name'], direction=tuner_cfg['metric_cfg']['OptimizationDirection'])
+                if not err:
+                    ctx.logger.info("Current best config: {}".format(cur_best_cfgs))
+                    recorder.store_history(ctx.args.auto_tuner_json.split(".")[0] + "_history.csv")
+                else:
+                    ctx.logger.info("Get best config failed. Currently there are no appropriate configs.")
 
             new_cfg = auto_tuner.search_once()
             if new_cfg:
@@ -380,13 +400,11 @@ def launch():
             else:
                 c.finalize(exit=True)
 
-            # NOTE: The statistics and comparison function of task results will be implemented in the future.
-
             # per task launch interval
             time.sleep(5)
 
             cur_cfg = copy.deepcopy(new_cfg)
-
+        recorder.store_history()
     else:
 
         from . import controllers
